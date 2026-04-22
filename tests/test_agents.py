@@ -79,7 +79,7 @@ async def test_run_calls_tool_and_continues(agent):
 def investigator():
     from tools.datadog_tool import DatadogTool
     from tools.knowledge_tool import KnowledgeTool
-    datadog = DatadogTool(api_key="test-key", app_key="test-app-key")
+    datadog = DatadogTool(api_key="test-key", app_key="test-app-key", mcp_url="https://mcp.datadoghq.com")
     knowledge = KnowledgeTool(knowledge_dir=_KNOWLEDGE_DIR)
     return InvestigatorAgent(datadog_tool=datadog, knowledge_tool=knowledge)
 
@@ -88,7 +88,7 @@ def investigator():
 def smoke_detector():
     from tools.datadog_tool import DatadogTool
     from tools.cross_tenant import CrossTenantTool
-    datadog = DatadogTool(api_key="test-key", app_key="test-app-key")
+    datadog = DatadogTool(api_key="test-key", app_key="test-app-key", mcp_url="https://mcp.datadoghq.com")
     cross_tenant = CrossTenantTool(datadog_tool=datadog)
     return SmokeDetectorAgent(datadog_tool=datadog, cross_tenant_tool=cross_tenant)
 
@@ -119,7 +119,7 @@ def supervisor():
     from tools.workato_tool import WorkatoTool
     from tools.cross_tenant import CrossTenantTool
 
-    datadog = DatadogTool(api_key="test-key", app_key="test-app-key")
+    datadog = DatadogTool(api_key="test-key", app_key="test-app-key", mcp_url="https://mcp.datadoghq.com")
     knowledge = KnowledgeTool(knowledge_dir=_KNOWLEDGE_DIR)
     workato = WorkatoTool()
     cross_tenant = CrossTenantTool(datadog_tool=datadog)

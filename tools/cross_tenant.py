@@ -4,7 +4,14 @@ from tools.datadog_tool import DatadogTool
 
 
 class CrossTenantTool:
-    """Queries Datadog APM across all tenant environments to detect platform-wide patterns."""
+    """
+    Detects platform-wide error patterns by querying across all tenant environments
+    in Datadog using the MCP ddsql_run_query tool.
+
+    DDSQL (Datadog SQL) lets us GROUP BY the @tenant_id tag directly, giving an
+    accurate per-tenant error count without pagination limits — equivalent to the
+    logfire-mcp GROUP BY approach used in the original.
+    """
 
     def __init__(self, datadog_tool: DatadogTool) -> None:
         self.datadog_tool = datadog_tool
@@ -17,64 +24,56 @@ class CrossTenantTool:
         end_utc: str,
     ) -> str:
         """
-        Search for an error pattern across ALL tenant environments in Datadog.
-        Returns affected tenant count, distinct tenant IDs, and earliest occurrence.
-        Uses the Datadog spans analytics aggregate endpoint grouped by @tenant_id.
+        Count how many tenants are affected by an error pattern using DDSQL.
+        The query groups error spans by @tenant_id so we get one row per tenant,
+        regardless of how many matching spans exist.
         """
         DatadogTool._sanitize(error_signature)
         DatadogTool._sanitize(service)
         DatadogTool._validate_timestamp(start_utc)
         DatadogTool._validate_timestamp(end_utc)
 
-        payload = {
-            "data": {
-                "attributes": {
-                    "compute": [{"aggregation": "count", "type": "total"}],
-                    "filter": {
-                        "query": (
-                            f"service:{service} @error.stack:* "
-                            f"@error.message:*{error_signature}*"
-                        ),
-                        "from": start_utc,
-                        "to": end_utc,
-                    },
-                    "group_by": [
-                        {
-                            "facet": "@tenant_id",
-                            "limit": 200,
-                            "sort": {
-                                "aggregation": "count",
-                                "order": "desc",
-                                "type": "measure",
-                            },
-                            "total": False,
-                        }
-                    ],
-                },
-                "type": "aggregate_request",
-            }
-        }
-
-        raw = await self.datadog_tool._post(
-            "/api/v2/spans/analytics/aggregate", payload
+        # DDSQL query over APM spans grouped by tenant tag.
+        # The spans table exposes custom tags as @<tag_name>.
+        ddsql = (
+            f"SELECT tags['tenant_id'] AS tenant_id, "
+            f"count(*) AS error_count, "
+            f"min(start) AS earliest_occurrence "
+            f"FROM spans "
+            f"WHERE service = '{service}' "
+            f"AND error = 1 "
+            f"AND LOWER(error_message) LIKE '%{error_signature.lower()}%' "
+            f"AND start >= '{start_utc}' "
+            f"AND start <= '{end_utc}' "
+            f"GROUP BY tenant_id "
+            f"ORDER BY earliest_occurrence ASC"
         )
 
-        try:
-            body = json.loads(raw)
-            buckets = body.get("data", {}).get("buckets", [])
-        except (json.JSONDecodeError, AttributeError):
-            return raw
+        raw = await self.datadog_tool._call_mcp("ddsql_run_query", {"query": ddsql})
 
-        if not buckets:
+        # Parse the DDSQL result. The MCP tool returns JSON or a text table.
+        try:
+            rows = json.loads(raw)
+            if not isinstance(rows, list):
+                rows = rows.get("data", rows.get("rows", []))
+        except (json.JSONDecodeError, AttributeError):
+            # If DDSQL returned an error or non-JSON, surface it directly.
+            if "error" in raw.lower() or not raw.strip().startswith("["):
+                return raw
+            rows = []
+
+        if not rows:
             return f"0 tenants affected — no matches found for pattern: {error_signature}"
 
         tenant_ids = [
-            b["by"].get("@tenant_id", "unknown")
-            for b in buckets
-            if "by" in b
+            r.get("tenant_id") or r.get("0") or "unknown"
+            for r in rows
+            if isinstance(r, dict)
         ]
-
-        earliest = start_utc
+        earliest = min(
+            (r.get("earliest_occurrence", "") for r in rows if isinstance(r, dict)),
+            default=start_utc,
+        )
 
         return json.dumps({
             "affected_tenant_count": len(tenant_ids),
@@ -92,9 +91,10 @@ class CrossTenantTool:
             {
                 "name": "find_pattern_across_tenants",
                 "description": (
-                    "Search for an error pattern across ALL tenant environments in Datadog. "
-                    "Use this to determine if an issue is isolated to one customer or platform-wide. "
-                    "Returns the count of affected tenants, their IDs, and pattern confidence."
+                    "Search for an error pattern across ALL tenant environments in Datadog "
+                    "using DDSQL (via the Datadog MCP ddsql_run_query tool). "
+                    "Groups results by @tenant_id to determine platform-wide vs isolated impact. "
+                    "Returns affected tenant count, IDs, earliest occurrence, and confidence level."
                 ),
                 "input_schema": {
                     "type": "object",
@@ -102,7 +102,7 @@ class CrossTenantTool:
                         "error_signature": {
                             "type": "string",
                             "description": (
-                                "The normalised error type or message fragment to search for. "
+                                "Normalised error message fragment to search for. "
                                 "Strip tenant-specific IDs, request IDs, and timestamps first."
                             ),
                         },

@@ -9,6 +9,12 @@ DD_API_KEY: str = os.environ["DD_API_KEY"]
 DD_APP_KEY: str = os.environ["DD_APP_KEY"]
 DD_SITE: str = os.getenv("DD_SITE", "datadoghq.com")
 
+# Datadog MCP server URL. The exact URL is site-specific — use the Datadog
+# site selector on https://docs.datadoghq.com/bits_ai/mcp_server/setup/ to
+# find the URL for your site. Defaults to the pattern used by US1.
+# Leave empty to fall back to the local datadog_mcp_cli binary (OAuth auth).
+DD_MCP_URL: str = os.getenv("DD_MCP_URL", f"https://mcp.{DD_SITE}")
+
 WORKATO_WEBHOOK_SF_READ: str = os.getenv("WORKATO_WEBHOOK_SF_READ", "")
 WORKATO_WEBHOOK_TFS_WRITE: str = os.getenv("WORKATO_WEBHOOK_TFS_WRITE", "")
 WORKATO_API_KEY: str = os.getenv("WORKATO_API_KEY", "")

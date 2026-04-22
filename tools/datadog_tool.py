@@ -1,31 +1,46 @@
 from __future__ import annotations
-import json
+import os
 import re
 from typing import Optional
-import httpx
 
 _ISO_UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$")
 
 
 class DatadogTool:
-    """Wraps the Datadog REST API for querying APM spans and logs."""
+    """
+    Wraps the Datadog MCP server for querying APM spans, logs, and metrics.
 
-    def __init__(self, api_key: str, app_key: str, site: str = "datadoghq.com") -> None:
+    Connects via Streamable HTTP transport (primary) using DD-API-KEY /
+    DD-APPLICATION-KEY headers, matching the Datadog MCP docs' header-auth
+    configuration. Falls back to the local datadog_mcp_cli binary via stdio
+    transport when mcp_url is empty (useful for developer workstations that
+    have run `datadog_mcp_cli login`).
+
+    Datadog MCP tools used:
+        query_traces          → search_datadog_spans
+        get_trace_detail      → get_datadog_trace
+        query_logs            → search_datadog_logs
+        get_service_error_rate → analyze_datadog_logs (SQL aggregation)
+    """
+
+    TOOLSETS = "core,apm,ddsql"
+
+    def __init__(
+        self,
+        api_key: str,
+        app_key: str,
+        mcp_url: str,
+        binary_path: str = "datadog_mcp_cli",
+    ) -> None:
         self.api_key = api_key
         self.app_key = app_key
-        self.base_url = f"https://api.{site}"
-
-    def _headers(self) -> dict:
-        return {
-            "DD-API-KEY": self.api_key,
-            "DD-APPLICATION-KEY": self.app_key,
-            "Content-Type": "application/json",
-        }
+        self.mcp_url = mcp_url.rstrip("/") if mcp_url else ""
+        self.binary_path = binary_path
 
     @staticmethod
     def _sanitize(value: str) -> str:
-        """Reject values containing Datadog query metacharacters to prevent injection."""
-        for c in ('"', "\\", "\n", "\r", "\x00", "(", ")"):
+        """Reject values that could inject Datadog query or SQL syntax."""
+        for c in ('"', "'", "\\", "\n", "\r", "\x00", ";", "--"):
             if c in value:
                 raise ValueError(f"Invalid characters in query parameter: {value!r}")
         return value
@@ -36,22 +51,76 @@ class DatadogTool:
             raise ValueError(f"Invalid timestamp format (expected ISO 8601 UTC): {value!r}")
         return value
 
-    async def _post(self, path: str, payload: dict) -> str:
-        """POST to a Datadog API endpoint, return response body as string."""
+    async def _call_mcp(self, tool_name: str, tool_input: dict) -> str:
+        """Dispatch a call to the Datadog MCP server (HTTP or stdio transport)."""
+        if self.mcp_url:
+            return await self._call_mcp_http(tool_name, tool_input)
+        return await self._call_mcp_stdio(tool_name, tool_input)
+
+    async def _call_mcp_http(self, tool_name: str, tool_input: dict) -> str:
+        """
+        Open a fresh Streamable HTTP connection to the Datadog MCP server,
+        authenticated via DD-API-KEY / DD-APPLICATION-KEY headers, call a tool,
+        and return the text result.
+        """
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{self.base_url}{path}",
-                    json=payload,
-                    headers=self._headers(),
-                    timeout=30,
-                )
-                response.raise_for_status()
-                return response.text
-        except httpx.HTTPStatusError as e:
-            return f"[Datadog API error — HTTP {e.response.status_code}: {e.response.text[:200]}]"
-        except httpx.RequestError as e:
-            return f"[Datadog API unreachable — {type(e).__name__}: {e}]"
+            from mcp import ClientSession
+            from mcp.client.streamable_http import streamablehttp_client
+        except ImportError:
+            return (
+                "[Error: mcp library with Streamable HTTP support not installed. "
+                "Run: pip install 'mcp>=1.9.0']"
+            )
+
+        url = f"{self.mcp_url}?toolsets={self.TOOLSETS}"
+        headers = {
+            "DD-API-KEY": self.api_key,
+            "DD-APPLICATION-KEY": self.app_key,
+        }
+        try:
+            async with streamablehttp_client(url=url, headers=headers) as (read, write, _):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    result = await session.call_tool(tool_name, tool_input)
+                    if result.content:
+                        return result.content[0].text
+                    return "[]"
+        except Exception as e:
+            return f"[Datadog MCP error — {type(e).__name__}: {e}]"
+
+    async def _call_mcp_stdio(self, tool_name: str, tool_input: dict) -> str:
+        """
+        Open a fresh stdio connection to the local datadog_mcp_cli binary
+        (OAuth-authenticated via `datadog_mcp_cli login`), call a tool,
+        and return the text result.
+        """
+        try:
+            from mcp import ClientSession, StdioServerParameters
+            from mcp.client.stdio import stdio_client
+        except ImportError:
+            return "[Error: mcp library not installed. Run: pip install 'mcp>=1.9.0']"
+
+        server_params = StdioServerParameters(
+            command=self.binary_path,
+            args=["--toolsets", self.TOOLSETS],
+            env=os.environ.copy(),
+        )
+        try:
+            async with stdio_client(server_params) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    result = await session.call_tool(tool_name, tool_input)
+                    if result.content:
+                        return result.content[0].text
+                    return "[]"
+        except FileNotFoundError:
+            return (
+                "[Error: datadog_mcp_cli binary not found. "
+                "Install via: curl -sSL https://coterm.datadoghq.com/mcp-cli/install.sh | bash "
+                "then run: datadog_mcp_cli login]"
+            )
+        except Exception as e:
+            return f"[Datadog MCP (stdio) error — {type(e).__name__}: {e}]"
 
     async def query_traces(
         self,
@@ -61,153 +130,88 @@ class DatadogTool:
         service: Optional[str] = None,
         error_only: bool = False,
     ) -> str:
-        """Return spans for a tenant in a time window via the Datadog spans search API."""
+        """Search Datadog APM spans for a tenant using the MCP search_datadog_spans tool."""
         self._sanitize(tenant_id)
         self._validate_timestamp(start_utc)
         self._validate_timestamp(end_utc)
         if service:
             self._sanitize(service)
 
-        query_parts = [f"@tenant_id:{tenant_id}"]
+        parts = [f"@tenant_id:{tenant_id}"]
         if service:
-            query_parts.append(f"service:{service}")
+            parts.append(f"service:{service}")
         if error_only:
-            query_parts.append("@error.stack:*")
+            parts.append("@error.stack:*")
 
-        payload = {
-            "data": {
-                "attributes": {
-                    "filter": {
-                        "query": " ".join(query_parts),
-                        "from": start_utc,
-                        "to": end_utc,
-                    },
-                    "sort": "-timestamp",
-                    "page": {"limit": 100},
-                },
-                "type": "search_request",
-            }
-        }
-        return await self._post("/api/v2/spans/events/search", payload)
+        return await self._call_mcp("search_datadog_spans", {
+            "query": " ".join(parts),
+            "from": start_utc,
+            "to": end_utc,
+            "limit": 100,
+        })
 
     async def get_trace_detail(self, trace_id: str) -> str:
-        """Return the full span tree for a single trace via spans search."""
+        """Fetch the complete span tree for a trace using the MCP get_datadog_trace tool."""
         self._sanitize(trace_id)
-        payload = {
-            "data": {
-                "attributes": {
-                    "filter": {
-                        "query": f"@trace_id:{trace_id}",
-                    },
-                    "sort": "timestamp",
-                    "page": {"limit": 1000},
-                },
-                "type": "search_request",
-            }
-        }
-        return await self._post("/api/v2/spans/events/search", payload)
+        return await self._call_mcp("get_datadog_trace", {"trace_id": trace_id})
 
     async def query_logs(
         self, tenant_id: str, query: str, start_utc: str, end_utc: str
     ) -> str:
-        """Search Datadog logs for a tenant matching a keyword or error string."""
+        """Search Datadog logs for a tenant using the MCP search_datadog_logs tool."""
         self._sanitize(tenant_id)
         self._sanitize(query)
         self._validate_timestamp(start_utc)
         self._validate_timestamp(end_utc)
 
-        payload = {
-            "filter": {
-                "query": f"@tenant_id:{tenant_id} {query}",
-                "from": start_utc,
-                "to": end_utc,
-            },
-            "sort": "-timestamp",
-            "page": {"limit": 50},
-        }
-        return await self._post("/api/v2/logs/events/search", payload)
+        return await self._call_mcp("search_datadog_logs", {
+            "query": f"@tenant_id:{tenant_id} {query}",
+            "from": start_utc,
+            "to": end_utc,
+        })
 
     async def get_service_error_rate(
         self, tenant_id: str, service: str, start_utc: str, end_utc: str
     ) -> str:
-        """Error count per minute for a service in a time window via spans analytics."""
+        """
+        Aggregate error counts per minute using the MCP analyze_datadog_logs tool.
+        This uses the SQL aggregation capability to group error log events by minute.
+        """
         self._sanitize(tenant_id)
         self._sanitize(service)
         self._validate_timestamp(start_utc)
         self._validate_timestamp(end_utc)
 
-        # Two aggregate requests: total spans and error spans, both grouped by minute.
-        base_filter = {
+        sql = (
+            f"SELECT date_trunc('minute', timestamp) AS minute, "
+            f"count(*) AS error_count "
+            f"FROM logs "
+            f"WHERE service = '{service}' "
+            f"AND @tenant_id = '{tenant_id}' "
+            f"AND status = 'error' "
+            f"GROUP BY minute "
+            f"ORDER BY minute ASC"
+        )
+        return await self._call_mcp("analyze_datadog_logs", {
+            "query": sql,
             "from": start_utc,
             "to": end_utc,
-        }
-
-        async def _aggregate(extra_query: str) -> list:
-            payload = {
-                "data": {
-                    "attributes": {
-                        "compute": [{"aggregation": "count", "type": "total"}],
-                        "filter": {
-                            **base_filter,
-                            "query": f"service:{service} @tenant_id:{tenant_id}{extra_query}",
-                        },
-                        "group_by": [
-                            {
-                                "facet": "timestamp",
-                                "interval": "1m",
-                                "limit": 60,
-                                "sort": {
-                                    "aggregation": "count",
-                                    "order": "asc",
-                                    "type": "measure",
-                                },
-                                "total": False,
-                            }
-                        ],
-                    },
-                    "type": "aggregate_request",
-                }
-            }
-            raw = await self._post("/api/v2/spans/analytics/aggregate", payload)
-            try:
-                return json.loads(raw).get("data", {}).get("buckets", [])
-            except (json.JSONDecodeError, AttributeError):
-                return []
-
-        total_buckets = await _aggregate("")
-        error_buckets = await _aggregate(" @error.stack:*")
-
-        error_by_minute = {
-            b["by"].get("timestamp", ""): b["computes"].get("c0", 0)
-            for b in error_buckets
-            if "by" in b
-        }
-
-        result = []
-        for bucket in total_buckets:
-            minute = bucket.get("by", {}).get("timestamp", "")
-            result.append({
-                "minute": minute,
-                "total_spans": bucket.get("computes", {}).get("c0", 0),
-                "error_count": error_by_minute.get(minute, 0),
-            })
-
-        return json.dumps(result) if result else json.dumps([])
+        })
 
     def as_tools(self) -> list[dict]:
-        """Return Anthropic tool definitions for this tool."""
+        """Return Anthropic tool definitions exposed to Claude."""
         return [
             {
                 "name": "query_traces",
                 "description": (
-                    "Query Datadog APM spans/traces for a specific tenant and time window. "
-                    "Use error_only=true to filter to error spans only. "
-                    "Returns up to 100 spans with trace_id, service, error details."
+                    "Search Datadog APM spans/traces for a specific tenant and time window "
+                    "via the Datadog MCP server. Use error_only=true to filter to error spans. "
+                    "Returns up to 100 spans with trace_id, service name, and error details."
                 ),
                 "input_schema": {
                     "type": "object",
                     "properties": {
-                        "tenant_id": {"type": "string", "description": "The tenant identifier tag value in Datadog"},
+                        "tenant_id": {"type": "string", "description": "The @tenant_id tag value in Datadog"},
                         "start_utc": {"type": "string", "description": "Start of time window in ISO 8601 UTC"},
                         "end_utc": {"type": "string", "description": "End of time window in ISO 8601 UTC"},
                         "service": {"type": "string", "description": "Filter to a specific service name (optional)"},
@@ -219,8 +223,8 @@ class DatadogTool:
             {
                 "name": "get_trace_detail",
                 "description": (
-                    "Get the complete span tree for a single trace ID from Datadog APM. "
-                    "Use this to understand the full call chain for a specific error."
+                    "Fetch the complete span tree for a single Datadog trace ID via the MCP server. "
+                    "Use this to understand the full call chain, timing, and errors for a specific request."
                 ),
                 "input_schema": {
                     "type": "object",
@@ -232,12 +236,15 @@ class DatadogTool:
             },
             {
                 "name": "query_logs",
-                "description": "Search Datadog logs for a tenant matching a keyword or error string.",
+                "description": (
+                    "Search Datadog logs for a tenant matching a keyword or error string "
+                    "via the MCP server's search_datadog_logs tool."
+                ),
                 "input_schema": {
                     "type": "object",
                     "properties": {
                         "tenant_id": {"type": "string"},
-                        "query": {"type": "string", "description": "Keyword to search in log messages"},
+                        "query": {"type": "string", "description": "Keyword or error string to search in log messages"},
                         "start_utc": {"type": "string"},
                         "end_utc": {"type": "string"},
                     },
@@ -247,8 +254,9 @@ class DatadogTool:
             {
                 "name": "get_service_error_rate",
                 "description": (
-                    "Get error count per minute for a service/tenant pair using Datadog spans analytics. "
-                    "Use this for a quick surface scan to confirm there is a spike before deep investigation."
+                    "Get error log count per minute for a service/tenant pair using the MCP "
+                    "analyze_datadog_logs tool (SQL aggregation). Use this for a quick surface "
+                    "scan to confirm an error spike before deep investigation."
                 ),
                 "input_schema": {
                     "type": "object",
