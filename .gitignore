@@ -6,3 +6,4 @@ __pycache__/
 conversations.db
 *.db
 .superpowers/
+.venv/

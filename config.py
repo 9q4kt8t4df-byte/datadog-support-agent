@@ -9,6 +9,12 @@ DD_API_KEY: str = os.environ["DD_API_KEY"]
 DD_APP_KEY: str = os.environ["DD_APP_KEY"]
 DD_SITE: str = os.getenv("DD_SITE", "datadoghq.com")
 
+# Datadog MCP server URL. The exact URL is site-specific — use the Datadog
+# site selector on https://docs.datadoghq.com/bits_ai/mcp_server/setup/ to
+# find the URL for your site. Defaults to the pattern used by US1.
+# Leave empty to fall back to the local datadog_mcp_cli binary (OAuth auth).
+DD_MCP_URL: str = os.getenv("DD_MCP_URL", f"https://mcp.{DD_SITE}")
+
 WORKATO_WEBHOOK_SF_READ: str = os.getenv("WORKATO_WEBHOOK_SF_READ", "")
 WORKATO_WEBHOOK_TFS_WRITE: str = os.getenv("WORKATO_WEBHOOK_TFS_WRITE", "")
 WORKATO_API_KEY: str = os.getenv("WORKATO_API_KEY", "")
@@ -20,12 +26,24 @@ CHAT_BASE_URL: str = os.getenv("CHAT_BASE_URL", "http://localhost:8000")
 
 def _parse_smoke_threshold(value: str) -> int:
     try:
-        return int(value)
+        n = int(value)
     except (ValueError, TypeError):
         raise ValueError(f"SMOKE_THRESHOLD must be an integer, got: {value!r}")
+    if n < 1:
+        raise ValueError(f"SMOKE_THRESHOLD must be a positive integer, got: {n}")
+    return n
+
+
+def _validate_mcp_url(url: str) -> str:
+    if url and not url.startswith("https://"):
+        raise ValueError(
+            f"DD_MCP_URL must be an HTTPS URL or empty (for stdio fallback), got: {url!r}"
+        )
+    return url
 
 
 SMOKE_THRESHOLD: int = _parse_smoke_threshold(os.getenv("SMOKE_THRESHOLD", "100"))
+DD_MCP_URL = _validate_mcp_url(DD_MCP_URL)
 
 AGENTS: dict = {
     "support-supervisor": {

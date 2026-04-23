@@ -9,6 +9,8 @@ class BaseAgent:
     Subclasses receive tool instances via __init__ and do not need to override run().
     """
 
+    MAX_TOOL_CALLS = 20
+
     def __init__(self, agent_id: str, config: dict, tools: list) -> None:
         self.agent_id = agent_id
         self.config = config
@@ -27,8 +29,11 @@ class BaseAgent:
         """Run the tool-use loop. Returns (response_text, tools_used)."""
         tools_used: list[str] = []
         current_messages = list(messages)
+        tool_call_count = 0
 
         while True:
+            if tool_call_count >= self.MAX_TOOL_CALLS:
+                return f"[Agent halted: exceeded {self.MAX_TOOL_CALLS} tool calls]", tools_used
             kwargs = dict(
                 model=self.config["model"],
                 max_tokens=self.config["max_tokens"],
@@ -47,6 +52,7 @@ class BaseAgent:
                 return "", tools_used
 
             elif response.stop_reason == "tool_use":
+                tool_call_count += 1
                 tool_results = []
                 for block in response.content:
                     if block.type == "tool_use":

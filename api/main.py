@@ -16,7 +16,7 @@ def build_orchestrator() -> AgentOrchestrator:
     datadog = DatadogTool(
         api_key=cfg.DD_API_KEY,
         app_key=cfg.DD_APP_KEY,
-        site=cfg.DD_SITE,
+        mcp_url=cfg.DD_MCP_URL,
     )
     knowledge = KnowledgeTool()
     workato = WorkatoTool()
