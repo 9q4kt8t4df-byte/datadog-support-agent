@@ -75,6 +75,31 @@ async def test_run_calls_tool_and_continues(agent):
     mock_tool.call.assert_called_once_with("fake_tool", {"param": "value"})
 
 
+@pytest.mark.asyncio
+async def test_run_halts_after_max_tool_calls(agent):
+    """Agent must stop and return an error message if the tool loop exceeds MAX_TOOL_CALLS."""
+    tool_use_response = MagicMock()
+    tool_use_response.stop_reason = "tool_use"
+    tool_block = MagicMock()
+    tool_block.type = "tool_use"
+    tool_block.name = "fake_tool"
+    tool_block.input = {}
+    tool_block.id = "tool-call-1"
+    tool_use_response.content = [tool_block]
+
+    mock_tool = AsyncMock()
+    mock_tool.call = AsyncMock(return_value="still going")
+    agent.tool_map = {"fake_tool": mock_tool}
+
+    with patch("agents.base.anthropic.AsyncAnthropic"):
+        agent.client = AsyncMock()
+        agent.client.messages.create = AsyncMock(return_value=tool_use_response)
+        text, tools = await agent.run([{"role": "user", "content": "loop forever"}])
+
+    assert "halted" in text.lower() or "exceeded" in text.lower()
+    assert mock_tool.call.call_count <= agent.MAX_TOOL_CALLS
+
+
 @pytest.fixture
 def investigator():
     from tools.datadog_tool import DatadogTool
@@ -178,6 +203,34 @@ def test_smoke_threshold_invalid_env_raises_clear_error():
     import config
     with pytest.raises(ValueError, match="SMOKE_THRESHOLD must be an integer"):
         config._parse_smoke_threshold("not-a-number")
+
+
+def test_smoke_threshold_zero_raises_error():
+    import config
+    with pytest.raises(ValueError, match="positive integer"):
+        config._parse_smoke_threshold("0")
+
+
+def test_smoke_threshold_negative_raises_error():
+    import config
+    with pytest.raises(ValueError, match="positive integer"):
+        config._parse_smoke_threshold("-5")
+
+
+def test_validate_mcp_url_accepts_https():
+    import config
+    assert config._validate_mcp_url("https://mcp.datadoghq.com") == "https://mcp.datadoghq.com"
+
+
+def test_validate_mcp_url_accepts_empty():
+    import config
+    assert config._validate_mcp_url("") == ""
+
+
+def test_validate_mcp_url_rejects_http():
+    import config
+    with pytest.raises(ValueError, match="HTTPS"):
+        config._validate_mcp_url("http://mcp.datadoghq.com")
 
 
 def test_supervisor_prompt_includes_update_sf_priority_instruction():

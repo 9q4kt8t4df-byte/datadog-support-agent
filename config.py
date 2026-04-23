@@ -26,12 +26,24 @@ CHAT_BASE_URL: str = os.getenv("CHAT_BASE_URL", "http://localhost:8000")
 
 def _parse_smoke_threshold(value: str) -> int:
     try:
-        return int(value)
+        n = int(value)
     except (ValueError, TypeError):
         raise ValueError(f"SMOKE_THRESHOLD must be an integer, got: {value!r}")
+    if n < 1:
+        raise ValueError(f"SMOKE_THRESHOLD must be a positive integer, got: {n}")
+    return n
+
+
+def _validate_mcp_url(url: str) -> str:
+    if url and not url.startswith("https://"):
+        raise ValueError(
+            f"DD_MCP_URL must be an HTTPS URL or empty (for stdio fallback), got: {url!r}"
+        )
+    return url
 
 
 SMOKE_THRESHOLD: int = _parse_smoke_threshold(os.getenv("SMOKE_THRESHOLD", "100"))
+DD_MCP_URL = _validate_mcp_url(DD_MCP_URL)
 
 AGENTS: dict = {
     "support-supervisor": {

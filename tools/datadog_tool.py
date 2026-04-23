@@ -1,9 +1,10 @@
 from __future__ import annotations
 import os
 import re
-from typing import Optional
 
 _ISO_UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$")
+# Identifiers: tenant IDs and service names — alphanumeric, hyphens, underscores, dots only.
+_IDENTIFIER_RE = re.compile(r"^[a-zA-Z0-9_\-\.]+$")
 
 
 class DatadogTool:
@@ -38,9 +39,28 @@ class DatadogTool:
         self.binary_path = binary_path
 
     @staticmethod
+    def _sanitize_identifier(value: str) -> str:
+        """Whitelist-validate identifiers (tenant IDs, service names, trace IDs).
+
+        Only alphanumeric characters, hyphens, underscores, and dots are allowed.
+        This prevents Datadog filter syntax injection (e.g. '@service:admin') and
+        DDSQL injection via embedded quotes or operators.
+        """
+        if not value or not _IDENTIFIER_RE.match(value):
+            raise ValueError(
+                f"Invalid identifier — only alphanumeric, hyphens, underscores, "
+                f"and dots are allowed: {value!r}"
+            )
+        return value
+
+    @staticmethod
     def _sanitize(value: str) -> str:
-        """Reject values that could inject Datadog query or SQL syntax."""
-        for c in ('"', "'", "\\", "\n", "\r", "\x00", ";", "--"):
+        """Blacklist-validate free-text query strings (log queries, error signatures).
+
+        Rejects characters that could inject Datadog query syntax or DDSQL operators.
+        Use _sanitize_identifier for structured identifiers instead.
+        """
+        for c in ('"', "'", "\\", "\n", "\r", "\x00", ";", "--", "%"):
             if c in value:
                 raise ValueError(f"Invalid characters in query parameter: {value!r}")
         return value
@@ -86,7 +106,7 @@ class DatadogTool:
                         return result.content[0].text
                     return "[]"
         except Exception as e:
-            return f"[Datadog MCP error — {type(e).__name__}: {e}]"
+            return f"[Datadog MCP error — {type(e).__name__}]"
 
     async def _call_mcp_stdio(self, tool_name: str, tool_input: dict) -> str:
         """
@@ -120,7 +140,7 @@ class DatadogTool:
                 "then run: datadog_mcp_cli login]"
             )
         except Exception as e:
-            return f"[Datadog MCP (stdio) error — {type(e).__name__}: {e}]"
+            return f"[Datadog MCP (stdio) error — {type(e).__name__}]"
 
     async def query_traces(
         self,
@@ -131,11 +151,11 @@ class DatadogTool:
         error_only: bool = False,
     ) -> str:
         """Search Datadog APM spans for a tenant using the MCP search_datadog_spans tool."""
-        self._sanitize(tenant_id)
+        self._sanitize_identifier(tenant_id)
         self._validate_timestamp(start_utc)
         self._validate_timestamp(end_utc)
         if service:
-            self._sanitize(service)
+            self._sanitize_identifier(service)
 
         parts = [f"@tenant_id:{tenant_id}"]
         if service:
@@ -152,14 +172,14 @@ class DatadogTool:
 
     async def get_trace_detail(self, trace_id: str) -> str:
         """Fetch the complete span tree for a trace using the MCP get_datadog_trace tool."""
-        self._sanitize(trace_id)
+        self._sanitize_identifier(trace_id)
         return await self._call_mcp("get_datadog_trace", {"trace_id": trace_id})
 
     async def query_logs(
         self, tenant_id: str, query: str, start_utc: str, end_utc: str
     ) -> str:
         """Search Datadog logs for a tenant using the MCP search_datadog_logs tool."""
-        self._sanitize(tenant_id)
+        self._sanitize_identifier(tenant_id)
         self._sanitize(query)
         self._validate_timestamp(start_utc)
         self._validate_timestamp(end_utc)
@@ -177,8 +197,8 @@ class DatadogTool:
         Aggregate error counts per minute using the MCP analyze_datadog_logs tool.
         This uses the SQL aggregation capability to group error log events by minute.
         """
-        self._sanitize(tenant_id)
-        self._sanitize(service)
+        self._sanitize_identifier(tenant_id)
+        self._sanitize_identifier(service)
         self._validate_timestamp(start_utc)
         self._validate_timestamp(end_utc)
 

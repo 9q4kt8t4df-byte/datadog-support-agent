@@ -28,8 +28,10 @@ class CrossTenantTool:
         The query groups error spans by @tenant_id so we get one row per tenant,
         regardless of how many matching spans exist.
         """
+        if not error_signature:
+            return '{"affected_tenant_count": 0, "affected_tenant_ids": [], "error": "error_signature must not be empty"}'
         DatadogTool._sanitize(error_signature)
-        DatadogTool._sanitize(service)
+        DatadogTool._sanitize_identifier(service)
         DatadogTool._validate_timestamp(start_utc)
         DatadogTool._validate_timestamp(end_utc)
 

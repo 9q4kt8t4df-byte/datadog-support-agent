@@ -153,17 +153,38 @@ async def test_call_mcp_uses_stdio_when_no_mcp_url():
 
 def test_sanitize_rejects_sql_injection_chars(tool):
     with pytest.raises(ValueError, match="Invalid characters"):
-        tool._sanitize("tenant'; DROP TABLE spans;--")
+        tool._sanitize("query'; DROP TABLE spans;--")
 
 
 def test_sanitize_rejects_newlines(tool):
     with pytest.raises(ValueError, match="Invalid characters"):
-        tool._sanitize("tenant\nevil")
+        tool._sanitize("query\nevil")
+
+
+def test_sanitize_rejects_like_wildcard(tool):
+    with pytest.raises(ValueError, match="Invalid characters"):
+        tool._sanitize("error%all")
 
 
 def test_sanitize_accepts_normal_values(tool):
-    assert tool._sanitize("tenant-acme") == "tenant-acme"
-    assert tool._sanitize("sync-worker") == "sync-worker"
+    assert tool._sanitize("ThrottlingException") == "ThrottlingException"
+    assert tool._sanitize("connection refused") == "connection refused"
+
+
+def test_sanitize_identifier_rejects_injection(tool):
+    with pytest.raises(ValueError, match="Invalid identifier"):
+        tool._sanitize_identifier("tenant @service:admin")
+
+
+def test_sanitize_identifier_rejects_empty(tool):
+    with pytest.raises(ValueError, match="Invalid identifier"):
+        tool._sanitize_identifier("")
+
+
+def test_sanitize_identifier_accepts_normal_values(tool):
+    assert tool._sanitize_identifier("tenant-acme") == "tenant-acme"
+    assert tool._sanitize_identifier("sync-worker") == "sync-worker"
+    assert tool._sanitize_identifier("abc123.service") == "abc123.service"
 
 
 def test_validate_timestamp_rejects_invalid(tool):
