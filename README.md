@@ -16,7 +16,7 @@ Tools, by name:
 
 - Datadog (`tools/datadog_tool.py`): `query_traces`, `get_trace_detail`, `query_logs`, `get_service_error_rate`. These call the Datadog REST API and expect a `tenant_id` tag on spans and logs.
 - Cross-tenant (`tools/cross_tenant.py`): `find_pattern_across_tenants`, a spans aggregate grouped by `@tenant_id`.
-- Knowledge (`tools/knowledge_tool.py`): `search_known_issues` (keyword search over `knowledge/*.md`) and `get_runbook`.
+- Knowledge (`tools/knowledge_tool.py`): `search_known_issues` (keyword search over every markdown file under `knowledge/`, including `knowledge/runbooks/`) and `get_runbook`.
 - Workato (`tools/workato_tool.py`): `read_salesforce_case`, `update_salesforce_case_priority`, `create_tfs_ticket`. The orchestrator also calls a Teams notification webhook (not a model tool) when a smoke alert is found.
 
 Behaviour set by the supervisor's system prompt:
